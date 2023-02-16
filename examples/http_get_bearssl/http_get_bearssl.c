@@ -32,6 +32,8 @@
 #include "bearssl.h"
 #include "http-parser/http_parser.h"
 #include "sysparam.h"
+#include <homekit/homekit.h>
+#include <homekit/characteristics.h>
 
 #define CLOCK_SECONDS_PER_MINUTE (60UL)
 #define CLOCK_MINUTES_PER_HOUR (60UL)
@@ -42,6 +44,9 @@
 #define WEB_SERVER "www.mytotalconnectcomfort.com"
 #define WEB_PORT "443"
 #define WEB_URL "https://mytotalconnectcomfort.com/portal/"
+//#define WEB_SERVER "192.168.1.176"
+//#define WEB_PORT "443"
+//#define WEB_URL "192.168.1.176"
 
 //#define GET_REQUEST "GET "WEB_URL" HTTP/1.1\nHost: "WEB_SERVER"\n\n"
 
@@ -276,7 +281,8 @@ static const br_x509_trust_anchor TAs[1] = {
  * This could be even smaller by using max_fragment_len, but
  * the howsmyssl.com server doesn't seem to support it.
  */
-static unsigned char bearssl_buffer[BR_SSL_BUFSIZE_MONO];
+//static unsigned char bearssl_buffer[BR_SSL_BUFSIZE_MONO];
+static unsigned char bearssl_buffer[4096];
 
 static br_ssl_client_context sc;
 static br_x509_minimal_context xc;
@@ -292,6 +298,7 @@ void http_get_task(void *pvParameters)
 {
     static int successes = 0, failures = 0;
     static int provisional_time = 0;
+
 
         /*
          * Wait until we can resolve the DNS for the server, as an indication
@@ -330,6 +337,7 @@ void http_get_task(void *pvParameters)
          * output areas").
          */
         br_ssl_engine_set_buffer(&sc.eng, bearssl_buffer, sizeof bearssl_buffer, 0);
+
 
         /*
          * Inject some entropy from the ESP hardware RNG
@@ -452,7 +460,11 @@ void http_get_task(void *pvParameters)
             if (result != BR_ERR_OK) {
                 close(fd);
                 freeaddrinfo(res);
-                printf("br_sslio_write_all failed: %d\r\n", br_ssl_engine_last_error(&sc.eng));
+               static char *error_name;
+               static char error_desc[100];
+               error_name = find_error_name(br_ssl_engine_last_error(&sc.eng), &error_desc);
+               printf("failure, error = %d\r\n", br_ssl_engine_last_error(&sc.eng));
+               printf("%s: %s\r\n", error_name, *error_desc);
                 failures++;
                 continue;
             }
@@ -512,9 +524,14 @@ void http_get_task(void *pvParameters)
         if (br_ssl_engine_last_error(&sc.eng) != BR_ERR_OK) {
             close(fd);
             freeaddrinfo(res);
+            static char* error_name;
+            static char error_desc[100];
+            error_name = find_error_name(br_ssl_engine_last_error(&sc.eng), error_desc);
             printf("failure, error = %d\r\n", br_ssl_engine_last_error(&sc.eng));
+            printf("%s: %s\r\n", error_name, error_desc);
             failures++;
-            continue;
+            //continue;
+            while (1) {};
         }
 
         printf("\r\n\r\nfree heap pre  = %u\r\n", xPortGetFreeHeapSize());
@@ -550,7 +567,7 @@ void http_get_task(void *pvParameters)
                 }
                 break;
             case DATA:
-                state = DATA_SEND;
+                state = DATA;
                 break;
             case LOGOUT:
                 state = LOGIN;
@@ -559,38 +576,38 @@ void http_get_task(void *pvParameters)
                 break;
         }
 
-        printf("What now? (g = get data, s = set data) >\r\n");
+        //printf("What now? (g = get data, s = set data) >\r\n");
 
-        static char option;
-        fgets(input_buf, sizeof(input_buf), stdin); printf("\r\n");
-        sscanf(input_buf, "%c", &option);
+        //static char option;
+        //fgets(input_buf, sizeof(input_buf), stdin); printf("\r\n");
+        //sscanf(input_buf, "%c", &option);
 
-        switch (option) {
-            case ('i'):
-               state = LOGIN;
-               break;
-            case('o'):
-               state = LOGOUT;
-               break;
-            case ('g'):
-                state = DATA;
-                break;
-            case ('s'):
-                printf("okay what data?\r\n");
-                fgets(input_buf, sizeof(input_buf), stdin);
-                *strchr(input_buf, '\n') = 0;
-                *strchr(input_buf, '\r') = 0;
+        //switch (option) {
+        //    case ('i'):
+        //       state = LOGIN;
+        //       break;
+        //    case('o'):
+        //       state = LOGOUT;
+        //       break;
+        //    case ('g'):
+        //        state = DATA;
+        //        break;
+        //    case ('s'):
+        //        printf("okay what data?\r\n");
+        //        fgets(input_buf, sizeof(input_buf), stdin);
+        //        *strchr(input_buf, '\n') = 0;
+        //        *strchr(input_buf, '\r') = 0;
 
-                state = DATA_SEND;
-                break;
-        }
+        //        state = DATA_SEND;
+        //        break;
+        //}
 
 
         //printf("Press any key to refresh\r\n");
         //getchar();
         for(int countdown = 1; countdown >= 0; countdown--) {
             printf("%d...\n", countdown);
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            vTaskDelay(5000 / portTICK_PERIOD_MS);
         }
         //printf("Starting again!\r\n\r\n");
     }
@@ -651,6 +668,85 @@ int message_complete_cb (http_parser *parser) {
 	return 0;
 }
 
+
+const int led_gpio = 2;
+bool led_on = false;
+
+void led_write(bool on) {
+    gpio_write(led_gpio, on ? 0 : 1);
+}
+
+void led_init() {
+    gpio_enable(led_gpio, GPIO_OUTPUT);
+    led_write(led_on);
+}
+
+void led_identify_task(void *_args) {
+    for (int i=0; i<3; i++) {
+        for (int j=0; j<2; j++) {
+            led_write(true);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            led_write(false);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+
+        vTaskDelay(250 / portTICK_PERIOD_MS);
+    }
+
+    led_write(led_on);
+
+    vTaskDelete(NULL);
+}
+
+void led_identify(homekit_value_t _value) {
+    printf("LED identify\n");
+    xTaskCreate(led_identify_task, "LED identify", 128, NULL, 2, NULL);
+}
+
+homekit_value_t led_on_get() {
+    return HOMEKIT_BOOL(led_on);
+}
+
+void led_on_set(homekit_value_t value) {
+    if (value.format != homekit_format_bool) {
+        printf("Invalid value format: %d\n", value.format);
+        return;
+    }
+
+    led_on = value.bool_value;
+    led_write(led_on);
+}
+
+const homekit_accessory_t *accessories[] = {
+    HOMEKIT_ACCESSORY(.id=1, .category=homekit_accessory_category_lightbulb, .services=(homekit_service_t*[]){
+        HOMEKIT_SERVICE(ACCESSORY_INFORMATION, .characteristics=(homekit_characteristic_t*[]){
+            HOMEKIT_CHARACTERISTIC(NAME, "Sample LED"),
+            HOMEKIT_CHARACTERISTIC(MANUFACTURER, "HaPK"),
+            HOMEKIT_CHARACTERISTIC(SERIAL_NUMBER, "037A2BABF19D"),
+            HOMEKIT_CHARACTERISTIC(MODEL, "MyLED"),
+            HOMEKIT_CHARACTERISTIC(FIRMWARE_REVISION, "0.1"),
+            HOMEKIT_CHARACTERISTIC(IDENTIFY, led_identify),
+            NULL
+        }),
+        HOMEKIT_SERVICE(LIGHTBULB, .primary=true, .characteristics=(homekit_characteristic_t*[]){
+            HOMEKIT_CHARACTERISTIC(NAME, "Sample LED"),
+            HOMEKIT_CHARACTERISTIC(
+                ON, false,
+                .getter=led_on_get,
+                .setter=led_on_set
+            ),
+            NULL
+        }),
+        NULL
+    }),
+    NULL
+};
+
+homekit_server_config_t hk_config = {
+    .accessories = (homekit_accessory_t**)accessories,
+    .password = "111-11-111"
+};
+
 void user_init(void)
 {
     uart_set_baud(0, 921600);
@@ -664,6 +760,7 @@ void user_init(void)
     /* required to call wifi_set_opmode before station_set_config */
     sdk_wifi_set_opmode(STATION_MODE);
     sdk_wifi_station_set_config(&config);
+    sdk_wifi_station_connect();
 
 
     sysparam_status = sysparam_get_info(&base_addr, &num_sectors);
@@ -706,5 +803,6 @@ void user_init(void)
     }
 
 
-    xTaskCreate(&http_get_task, "get_task", 2048, NULL, 2, NULL);
+    xTaskCreate(&http_get_task, "get_task", 2048, NULL, 1, NULL);
+    homekit_server_init(&hk_config);
 }
